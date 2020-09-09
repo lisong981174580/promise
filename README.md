@@ -183,7 +183,7 @@ promise2.then(res => {
 })
 ```
 
-```
+```js
 let promise1 = new Promise((resolve, reject) => {
   setTimeout(() => {
     resolve()
@@ -204,7 +204,7 @@ promise2.then(res => {
 
 2、如果 onFulfilled 或者onRejected 抛出一个异常 e ，则 promise2 必须变为失败（Rejected），并返回失败的值 e，例如：
 
-```
+```js
 let promise1 = new Promise((resolve, reject) => {
   setTimeout(() => {
     resolve('success')
@@ -222,7 +222,7 @@ promise2.then(res => {
 
 3、如果onFulfilled 不是函数且 promise1 状态为成功（Fulfilled）， promise2 必须变为成功（Fulfilled）并返回 promise1 成功的值，例如：
 
-```
+```js
 let promise1 = new Promise((resolve, reject) => {
   setTimeout(() => {
     resolve('success')
@@ -238,7 +238,7 @@ promise2.then(res => {
 
 4、如果 onRejected 不是函数且 promise1 状态为失败（Rejected），promise2必须变为失败（Rejected） 并返回 promise1 失败的值，例如：
 
-```
+```js
 let promise1 = new Promise((resolve, reject) => {
   setTimeout(() => {
     reject('fail')
@@ -258,3 +258,313 @@ promise2.then(res => {
 
 由于 then 方法支持多次调用，我们可以维护两个数组，将每次 then 方法注册时的回调函数添加到数组中，等待执行
 
+```js
+constructor (handle) {
+  if (!isFunction(handle)) {
+    throw new Error('MyPromise must accept a function as a parameter')
+  }
+  // 添加状态
+  this._status = PENDING
+  // 添加状态
+  this._value = undefined
+  // 添加成功回调函数队列
+  this._fulfilledQueues = []
+  // 添加失败回调函数队列
+  this._rejectedQueues = []
+  // 执行handle
+  try {
+    handle(this._resolve.bind(this), this._reject.bind(this)) 
+  } catch (err) {
+    this._reject(err)
+  }
+}
+```
+
+添加then方法
+
+首先，then 返回一个新的 Promise 对象，并且需要将回调函数加入到执行队列中
+
+```js
+// 添加then方法
+then (onFulfilled, onRejected) {
+  const { _value, _status } = this
+  switch (_status) {
+    // 当状态为pending时，将then方法回调函数加入执行队列等待执行
+    case PENDING:
+      this._fulfilledQueues.push(onFulfilled)
+      this._rejectedQueues.push(onRejected)
+      break
+    // 当状态已经改变时，立即执行对应的回调函数
+    case FULFILLED:
+      onFulfilled(_value)
+      break
+    case REJECTED:
+      onRejected(_value)
+      break
+  }
+  // 返回一个新的Promise对象
+  return new MyPromise((onFulfilledNext, onRejectedNext) => {
+  })
+}
+```
+
+那返回的新的 Promise 对象什么时候改变状态？改变为哪种状态呢？
+
+根据上文中 then 方法的规则，我们知道返回的新的 Promise 对象的状态依赖于当前 then 方法回调函数执行的情况以及返回值，例如 then 的参数是否为一个函数、回调函数执行是否出错、返回值是否为 Promise 对象。
+
+我们来进一步完善 then 方法:
+
+```js
+// 添加then方法
+then (onFulfilled, onRejected) {
+  const { _value, _status } = this
+  // 返回一个新的Promise对象
+  return new MyPromise((onFulfilledNext, onRejectedNext) => {
+    // 封装一个成功时执行的函数
+    let fulfilled = value => {
+      try {
+        if (!isFunction(onFulfilled)) {
+          onFulfilledNext(value)
+        } else {
+          let res =  onFulfilled(value);
+          if (res instanceof MyPromise) {
+            // 如果当前回调函数返回MyPromise对象，必须等待其状态改变后在执行下一个回调
+            res.then(onFulfilledNext, onRejectedNext)
+          } else {
+            //否则会将返回结果直接作为参数，传入下一个then的回调函数，并立即执行下一个then的回调函数
+            onFulfilledNext(res)
+          }
+        }
+      } catch (err) {
+        // 如果函数执行出错，新的Promise对象的状态为失败
+        onRejectedNext(err)
+      }
+    }
+    // 封装一个失败时执行的函数
+    let rejected = error => {
+      try {
+        if (!isFunction(onRejected)) {
+          onRejectedNext(error)
+        } else {
+            let res = onRejected(error);
+            if (res instanceof MyPromise) {
+              // 如果当前回调函数返回MyPromise对象，必须等待其状态改变后在执行下一个回调
+              res.then(onFulfilledNext, onRejectedNext)
+            } else {
+              //否则会将返回结果直接作为参数，传入下一个then的回调函数，并立即执行下一个then的回调函数
+              onFulfilledNext(res)
+            }
+        }
+      } catch (err) {
+        // 如果函数执行出错，新的Promise对象的状态为失败
+        onRejectedNext(err)
+      }
+    }
+    switch (_status) {
+      // 当状态为pending时，将then方法回调函数加入执行队列等待执行
+      case PENDING:
+        this._fulfilledQueues.push(fulfilled)
+        this._rejectedQueues.push(rejected)
+        break
+      // 当状态已经改变时，立即执行对应的回调函数
+      case FULFILLED:
+        fulfilled(_value)
+        break
+      case REJECTED:
+        rejected(_value)
+        break
+    }
+  })
+}
+
+这一部分可能不太好理解，读者需要结合上文中 then 方法的规则来细细的分析。
+
+接着修改 _resolve 和 _reject ：依次执行队列中的函数
+
+当 resolve 或 reject 方法执行时，我们依次提取成功或失败任务队列当中的函数开始执行，并清空队列，从而实现 then 方法的多次调用，实现的代码如下：
+
+```js
+// 添加resovle时执行的函数
+_resolve (val) {
+  if (this._status !== PENDING) return
+  // 依次执行成功队列中的函数，并清空队列
+  const run = () => {
+    this._status = FULFILLED
+    this._value = val
+    let cb;
+    while (cb = this._fulfilledQueues.shift()) {
+      cb(val)
+    }
+  }
+  // 为了支持同步的Promise，这里采用异步调用
+  setTimeout(() => run(), 0)
+}
+// 添加reject时执行的函数
+_reject (err) { 
+  if (this._status !== PENDING) return
+  // 依次执行失败队列中的函数，并清空队列
+  const run = () => {
+    this._status = REJECTED
+    this._value = err
+    let cb;
+    while (cb = this._rejectedQueues.shift()) {
+      cb(err)
+    }
+  }
+  // 为了支持同步的Promise，这里采用异步调用
+  setTimeout(run, 0)
+}
+```
+
+这里还有一种特殊的情况，就是当 resolve 方法传入的参数为一个 Promise 对象时，则该 Promise 对象状态决定当前 Promise 对象的状态。
+
+```js
+const p1 = new Promise(function (resolve, reject) {
+  // ...
+});
+
+const p2 = new Promise(function (resolve, reject) {
+  // ...
+  resolve(p1);
+})
+```
+
+上面代码中，p1 和 p2 都是 Promise 的实例，但是 p2 的resolve方法将 p1 作为参数，即一个异步操作的结果是返回另一个异步操作。
+
+注意，这时 p1 的状态就会传递给 p2，也就是说，p1 的状态决定了 p2 的状态。如果 p1 的状态是Pending，那么 p2 的回调函数就会等待 p1 的状态改变；如果 p1 的状态已经是 Fulfilled 或者 Rejected，那么 p2 的回调函数将会立刻执行。
+
+我们来修改_resolve来支持这样的特性
+
+```js
+// 添加resovle时执行的函数
+_resolve (val) {
+  const run = () => {
+    if (this._status !== PENDING) return
+    this._status = FULFILLED
+    // 依次执行成功队列中的函数，并清空队列
+    const runFulfilled = (value) => {
+      let cb;
+      while (cb = this._fulfilledQueues.shift()) {
+        cb(value)
+      }
+    }
+    // 依次执行失败队列中的函数，并清空队列
+    const runRejected = (error) => {
+      let cb;
+      while (cb = this._rejectedQueues.shift()) {
+        cb(error)
+      }
+    }
+    /* 如果resolve的参数为Promise对象，则必须等待该Promise对象状态改变后,
+      当前Promsie的状态才会改变，且状态取决于参数Promsie对象的状态
+    */
+    if (val instanceof MyPromise) {
+      val.then(value => {
+        this._value = value
+        runFulfilled(value)
+      }, err => {
+        this._value = err
+        runRejected(err)
+      })
+    } else {
+      this._value = val
+      runFulfilled(val)
+    }
+  }
+  // 为了支持同步的Promise，这里采用异步调用
+  setTimeout(run, 0)
+}
+```
+
+这样一个Promise就基本实现了，现在我们来加一些其它的方法
+
+### catch 方法
+
+相当于调用 then 方法, 但只传入 Rejected 状态的回调函数
+
+```js
+// 添加catch方法
+catch (onRejected) {
+  return this.then(undefined, onRejected)
+}
+```
+
+### 静态 resolve 方法
+
+```js
+// 添加静态resolve方法
+static resolve (value) {
+  // 如果参数是MyPromise实例，直接返回这个实例
+  if (value instanceof MyPromise) return value
+  return new MyPromise(resolve => resolve(value))
+}
+```
+
+### 静态 reject 方法
+
+```js
+// 添加静态reject方法
+static reject (value) {
+  return new MyPromise((resolve ,reject) => reject(value))
+}
+```
+
+### 静态 all 方法
+
+```js
+// 添加静态all方法
+static all (list) {
+  return new MyPromise((resolve, reject) => {
+    /**
+     * 返回值的集合
+     */
+    let values = []
+    let count = 0
+    for (let [i, p] of list.entries()) {
+      // 数组参数如果不是MyPromise实例，先调用MyPromise.resolve
+      this.resolve(p).then(res => {
+        values[i] = res
+        count++
+        // 所有状态都变成fulfilled时返回的MyPromise状态就变成fulfilled
+        if (count === list.length) resolve(values)
+      }, err => {
+        // 有一个被rejected时返回的MyPromise状态就变成rejected
+        reject(err)
+      })
+    }
+  })
+}
+```
+
+### 静态 race 方法
+
+```js
+// 添加静态race方法
+static race (list) {
+  return new MyPromise((resolve, reject) => {
+    for (let p of list) {
+      // 只要有一个实例率先改变状态，新的MyPromise的状态就跟着改变
+      this.resolve(p).then(res => {
+        resolve(res)
+      }, err => {
+        reject(err)
+      })
+    }
+  })
+}
+```
+
+### finally 方法
+
+finally 方法用于指定不管 Promise 对象最后状态如何，都会执行的操作
+
+```js
+finally (cb) {
+  return this.then(
+    value  => MyPromise.resolve(cb()).then(() => value),
+    reason => MyPromise.resolve(cb()).then(() => { throw reason })
+  );
+};
+```
+
+这样一个完整的 Promsie 就实现了，大家对 Promise 的原理也有了解，可以让我们在使用Promise的时候更加清晰明了。
